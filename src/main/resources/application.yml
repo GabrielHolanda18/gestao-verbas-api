@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: gestao-verbas
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/verbas}
+    username: ${DB_USERNAME:verbas}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
