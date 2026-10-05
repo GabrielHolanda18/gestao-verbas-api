@@ -1,0 +1,110 @@
+### gestao-verbas — exemplos de requisições HTTP
+### Compatível com VS Code REST Client / JetBrains HTTP Client.
+### Base: http://localhost:8080 (sem autenticação — protótipo local)
+### Substitua os IDs de exemplo pelos IDs retornados ao criar seus registros.
+
+@base = http://localhost:8080
+
+### ---------------------------------------------------------------------------
+### 1. Criar departamento (201 + header Location)
+### Regras: orcamentoTotal > 0, <= 999999999999.99, no máximo 2 casas decimais.
+POST {{base}}/departamentos
+Content-Type: application/json
+
+{
+  "nome": "Engenharia",
+  "orcamentoTotal": 10000.00
+}
+
+### 2. Consultar departamento por id (200; 404 se inexistente)
+### Resposta: id, nome, orcamentoTotal, valorComprometido, saldoDisponivel, criadoEm
+GET {{base}}/departamentos/1
+
+### 3. Abrir solicitação de verba (201 + Location; 404 se departamento não existe)
+POST {{base}}/departamentos/1/solicitacoes
+Content-Type: application/json
+
+{
+  "descricao": "Compra de licencas de IDE",
+  "valor": 7000.00
+}
+
+### 4. Listar solicitações com filtros e paginação (size maximo 100)
+GET {{base}}/solicitacoes?departamentoId=1&status=PENDENTE&page=0&size=20
+
+### 5. Consultar solicitação por id (200; 404 se inexistente)
+GET {{base}}/solicitacoes/1
+
+### 6. Aprovar solicitação pendente (200)
+### Requer saldo suficiente; aprovar RESERVA o valor (nao paga).
+### 409 se saldo insuficiente, já decidida ou conflito de bloqueio.
+POST {{base}}/solicitacoes/1/aprovar
+Content-Type: application/json
+
+{
+  "responsavel": "Maria Analista"
+}
+
+### 7. Rejeitar OUTRA solicitação pendente (200)
+### Crie outro pedido e substitua o ID; o pedido aprovado no passo 6 retorna 409.
+### justificativa OBRIGATORIA (400 se ausente/vazia).
+POST {{base}}/solicitacoes/1/rejeitar
+Content-Type: application/json
+
+{
+  "responsavel": "Joao Gestor",
+  "justificativa": "Prioridade reavaliada neste trimestre"
+}
+
+### 8. Consultar histórico de decisões da solicitação (200; 404 se inexistente)
+GET {{base}}/solicitacoes/1/historico
+
+### ---------------------------------------------------------------------------
+### Exemplos de ERROS esperados
+
+### 400 — valor com 3 casas decimais (rejeitado pela validacao monetaria)
+POST {{base}}/departamentos/1/solicitacoes
+Content-Type: application/json
+
+{
+  "descricao": "Valor invalido",
+  "valor": 123.456
+}
+
+### 400 — orcamentoTotal negativo
+POST {{base}}/departamentos
+Content-Type: application/json
+
+{
+  "nome": "Invalido",
+  "orcamentoTotal": -50.00
+}
+
+### 400 — rejeicao sem justificativa
+POST {{base}}/solicitacoes/1/rejeitar
+Content-Type: application/json
+
+{
+  "responsavel": "Joao Gestor",
+  "justificativa": ""
+}
+
+### 404 — departamento inexistente
+GET {{base}}/departamentos/999999
+
+### 409 — aprovacao duplicada (solicitacao já APROVADA)
+POST {{base}}/solicitacoes/1/aprovar
+Content-Type: application/json
+
+{
+  "responsavel": "Maria Analista"
+}
+
+### 409 — saldo insuficiente (ex.: orcamento 10000, comprometido 7000,
+### nova solicitacao de 7000 pendente)
+POST {{base}}/solicitacoes/2/aprovar
+Content-Type: application/json
+
+{
+  "responsavel": "Maria Analista"
+}
