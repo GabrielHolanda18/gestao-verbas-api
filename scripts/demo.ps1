@@ -110,6 +110,6 @@ try {
 }
 catch {
     Escrever-Erro "Demonstracao falhou: $($_.Exception.Message)"
-    Write-Host "Verifique se a API esta ativa em $BaseUrl (docker compose --profile app up --build -d)." -ForegroundColor Yellow
+    Write-Host "Verifique se a API esta ativa em $BaseUrl (docker-compose -f compose.yaml --profile app up --build -d no Ubuntu WSL)." -ForegroundColor Yellow
     exit 1
 }
