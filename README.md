@@ -1,304 +1,397 @@
-# gestao-verbas — API REST de Gestão de Verbas
+# Gestão de Verbas — API REST
 
-API REST modular em **Java 21** com **Spring Boot 3.5.16** para gestão de orçamentos departamentais: criação de departamentos, abertura de solicitações de verba e aprovação/rejeição com reserva de saldo, histórico de decisões e concorrência controlada por bloqueio pessimista.
+API para gerenciar orçamentos departamentais, solicitações de verba e decisões de aprovação ou rejeição. Desenvolvida em **Java 21 com Spring Boot e PostgreSQL**, com organização por domínio, histórico de decisões e controle transacional para evitar reservas acima do orçamento disponível.
 
-> **Proveniência de desenvolvimento:** partes deste projeto foram delegadas durante o desenvolvimento ao NVIDIA NIM (modelo `z-ai/glm-5.3`, referência: https://docs.api.nvidia.com/nim/reference/z-ai-glm-5-3-infer) e revisadas localmente. **O runtime da aplicação não faz nenhuma chamada a IA** — a API é um serviço Spring Boot comum.
+## Navegação
 
-Documentação complementar (já fornecida no repositório):
-- [`docs/ambiente-wsl.md`](docs/ambiente-wsl.md) — execução no Ubuntu WSL desta máquina.
-- [`docs/validacao.md`](docs/validacao.md) — testes e demonstração executados.
-- [`docs/delegacao-nim.md`](docs/delegacao-nim.md) — rastreabilidade da geração e revisão.
-- [`docs/arquitetura.md`](docs/arquitetura.md) — decisões de arquitetura e camadas.
-- [`requisitos.md`](requisitos.md) — requisitos de negócio detalhados.
-- [`docs/api.http`](docs/api.http) — exemplos de requisições HTTP.
-- [`docs/consultas.sql`](docs/consultas.sql) — consultas SQL de verificação.
-- [`docs/roteiro-estudo.md`](docs/roteiro-estudo.md) — roteiro de estudo por módulo.
-- [`scripts/demo.ps1`](scripts/demo.ps1) — demonstração automatizada de 5 minutos.
+- [Funcionalidades](#funcionalidades)
+- [Tecnologias e arquitetura](#tecnologias-e-arquitetura)
+- [Como executar](#como-executar)
+- [IntelliJ com PostgreSQL local](#intellij-com-postgresql-local)
+- [Docker no Ubuntu ou WSL](#docker-no-ubuntu-ou-wsl)
+- [IntelliJ com banco no Docker](#intellij-com-banco-no-docker)
+- [Configuração](#configuração)
+- [Endpoints e exemplos](#endpoints-e-exemplos)
+- [Testes](#testes)
+- [Solução de problemas](#solução-de-problemas)
+- [Escopo e documentação](#escopo-e-documentação)
 
----
+## Funcionalidades
 
-## Requisitos do sistema
+- Cadastro, listagem e consulta de departamentos com orçamento próprio.
+- Abertura de solicitações e consulta com filtros por departamento e status, além de paginação.
+- Aprovação com reserva de saldo e rejeição com justificativa obrigatória.
+- Histórico de decisões por solicitação, com responsável e data.
+- Validação de entradas e respostas de erro padronizadas.
+- Controle de concorrência por bloqueio pessimista e transações atômicas.
 
-- **JDK 21** para execução local. Ao usar Docker, Java e Maven já estão na imagem.
-- **Docker Engine no Ubuntu WSL2** (ambiente validado nesta máquina). O launcher Docker Desktop do Windows não é necessário. Veja [ambiente WSL](docs/ambiente-wsl.md).
-- **Windows 10/11** com PowerShell 5.1 ou PowerShell 7 (equivalentes Linux indicados).
-- Requisitos oficiais do Spring Boot 3.5: https://docs.spring.io/spring-boot/3.5/system-requirements.html
+### Regras de negócio
 
----
+Uma solicitação começa como `PENDENTE` e pode passar para `APROVADA` ou `REJEITADA`. Uma decisão concluída não pode ser repetida nem revertida pela API.
 
-## Visão geral do domínio
+A aprovação exige saldo suficiente e aumenta o valor comprometido do departamento. Ela representa uma **reserva de orçamento**, sem executar pagamento. Se faltar saldo, a API retorna `409 Conflict`: a solicitação continua pendente e nenhum histórico de decisão é criado.
 
-| Entidade | Campos | Observações |
-|---|---|---|
-| `departamento` | `id`, `nome`, `orcamento_total`, `valor_comprometido`, `criado_em` | Orçamento total positivo; `valor_comprometido` inicia em 0. |
-| `solicitacao` | `id`, `departamento_id`, `descricao`, `valor`, `status`, `criado_em` | Status: `PENDENTE`, `APROVADA`, `REJEITADA`. Sem edição/exclusão. |
-| `historico_solicitacao` | `id`, `solicitacao_id`, `status_anterior`, `status_novo`, `responsavel`, `justificativa`, `criado_em` | Trilha de decisões. Rejeição exige justificativa. |
+Valores monetários são positivos, têm no máximo duas casas decimais e não podem exceder `999999999999.99`. O projeto usa `BigDecimal` no Java e `NUMERIC(14,2)` no banco. O saldo disponível corresponde ao orçamento total menos o valor comprometido.
 
-Dinheiro: `BigDecimal` / `NUMERIC(14,2)`, positivo, máximo `999999999999.99`; valores com mais de 2 casas decimais são rejeitados (HTTP 400). Timestamps: `Instant` / `TIMESTAMPTZ` (UTC).
+## Tecnologias e arquitetura
 
-### Diagrama Entidade-Relacionamento
+| Tecnologia | Papel no projeto |
+|---|---|
+| Java 21 / Spring Boot 3.5.16 | Aplicação e API REST |
+| Spring Data JPA / Hibernate | Persistência e mapeamento das entidades |
+| PostgreSQL | Banco relacional; imagem Docker fixada em 16.6 |
+| Flyway | Versionamento das tabelas, restrições e índices |
+| Jakarta Bean Validation | Validação das requisições |
+| JUnit / Testcontainers | Testes unitários e integração com PostgreSQL |
+| Maven Wrapper / Docker Compose | Build e execução reproduzíveis |
+
+Os pacotes agrupam as funcionalidades por domínio. Dentro deles, os controllers recebem as requisições, os services executam as regras e os repositories acessam o banco. As exceções são convertidas em respostas HTTP por um handler centralizado.
+
+```text
+src/main/java/br/com/gabriel/verbas/
+├── departamento/    # Orçamento e saldo dos departamentos
+├── solicitacao/     # Criação, consulta, aprovação e rejeição
+├── historico/       # Registro e consulta das decisões
+└── shared/          # Validação monetária e tratamento de erros
+
+src/main/resources/
+├── application.yml
+└── db/migration/    # Migrações versionadas pelo Flyway
+
+src/test/            # Testes unitários e de integração
+```
+
+A decisão bloqueia o departamento antes de validar e reservar saldo. A reserva, a mudança de status e o histórico pertencem à mesma transação: uma falha impede a confirmação parcial da operação.
 
 ```mermaid
 erDiagram
-    DEPARTAMENTO ||--o{ SOLICITACAO : "possui"
-    SOLICITACAO ||--o| HISTORICO_SOLICITACAO : "registra"
-
-    DEPARTAMENTO {
-        bigint id PK
-        varchar nome
-        numeric orcamento_total
-        numeric valor_comprometido
-        timestamptz criado_em
-    }
-    SOLICITACAO {
-        bigint id PK
-        bigint departamento_id FK
-        varchar descricao
-        numeric valor
-        varchar status
-        timestamptz criado_em
-    }
-    HISTORICO_SOLICITACAO {
-        bigint id PK
-        bigint solicitacao_id FK
-        varchar status_anterior
-        varchar status_novo
-        varchar responsavel
-        varchar justificativa
-        timestamptz criado_em
-    }
+    DEPARTAMENTO ||--o{ SOLICITACAO : possui
+    SOLICITACAO ||--o| HISTORICO_SOLICITACAO : registra_decisao
 ```
 
-### Regras de negócio (resumo)
+## Como executar
 
-1. **Orçamento positivo:** `orcamentoTotal` deve ser > 0 e `valorComprometido` começa em 0.
-2. **Valores monetários:** positivos, no máximo `999999999999.99`, no máximo 2 casas decimais; caso contrário, HTTP 400.
-3. **Aprovação só de pendentes:** apenas solicitações `PENDENTE` podem ser decididas; segunda decisão gera HTTP 409.
-4. **Saldo suficiente:** aprovação exige `valorComprometido + valor <= orcamentoTotal`; saldo insuficiente gera HTTP 409.
-5. **Aprovar reserva, não paga:** aprovação incrementa `valorComprometido` (reserva); não há pagamento/baixa.
-6. **Rejeição exige justificativa:** campo `justificativa` obrigatório na rejeição.
-7. **Decisões atômicas e concorrentes:** bloqueio pessimista do departamento primeiro, depois carregamento da solicitação; aprovação e rejeição seguem o mesmo protocolo. Conflito de bloqueio/tempo gera HTTP 409.
+Escolha uma das opções abaixo. Execute os comandos na pasta que contém `pom.xml` e `compose.yaml`.
 
-Sem endpoints de edição ou exclusão de registros; o histórico pode ser alterado por quem possui acesso direto ao banco. Sem autenticação: `responsavel` é um nome fictício informado pelo cliente; quando houver autenticação futura, o responsável virá de contexto confiável do servidor, não do corpo da requisição.
+| Opção | Pré-requisitos | Preparação do banco |
+|---|---|---|
+| IntelliJ + PostgreSQL local | JDK 21, IntelliJ IDEA e PostgreSQL instalado e iniciado | Criar usuário e banco manualmente |
+| Aplicação + banco no Docker | Docker Engine ativo e Docker Compose | A imagem do PostgreSQL cria usuário e banco na primeira inicialização do volume |
+| IntelliJ + banco no Docker | JDK 21, IntelliJ IDEA, Docker Engine e Compose | O contêiner prepara o banco; o IntelliJ executa a aplicação |
 
----
+**A aplicação não cria o usuário PostgreSQL nem o database `verbas`.** O Flyway precisa se conectar a um banco existente para criar e atualizar suas tabelas. O Hibernate está configurado com `ddl-auto: validate`, portanto valida a estrutura criada pelas migrações. Se usuário, senha, porta ou banco estiverem incorretos, a inicialização falha, mesmo que algumas mensagens de startup já tenham aparecido no console.
 
-## Rotas da API
+## IntelliJ com PostgreSQL local
 
-| Método | Rota | Corpo | Sucesso | Erros |
-|---|---|---|---|---|
-| POST | `/departamentos` | `{"nome":..., "orcamentoTotal":...}` | 201 + `Location` | 400 |
-| GET | `/departamentos/{id}` | — | 200 | 404 |
-| POST | `/departamentos/{id}/solicitacoes` | `{"descricao":..., "valor":...}` | 201 + `Location` | 400, 404 |
-| GET | `/solicitacoes?departamentoId=&status=&page=&size=` | — (size máx. 100) | 200 | 400 |
-| GET | `/solicitacoes/{id}` | — | 200 | 404 |
-| POST | `/solicitacoes/{id}/aprovar` | `{"responsavel":...}` | 200 | 400, 404, 409 |
-| POST | `/solicitacoes/{id}/rejeitar` | `{"responsavel":..., "justificativa":...}` | 200 | 400, 404, 409 |
-| GET | `/solicitacoes/{id}/historico` | — | 200 | 404 |
+### 1. Iniciar o PostgreSQL e confirmar a porta
 
-DTOs de resposta:
-- Departamento: `id`, `nome`, `orcamentoTotal`, `valorComprometido`, `saldoDisponivel`, `criadoEm`.
-- Solicitação: `id`, `departamentoId`, `descricao`, `valor`, `status`, `criadoEm`.
+Inicie o serviço do PostgreSQL. No Windows, ele pode ser localizado no aplicativo **Serviços**, com um nome como `postgresql-x64-18`.
 
----
+A porta usual do PostgreSQL é `5432`; o padrão desta aplicação é `5433`. **Não é necessário mudar a porta do servidor:** configure `DB_URL` com a porta em que ele já está atendendo. Os exemplos desta seção usam `5432`. Se o seu servidor usa `5433`, substitua a porta em todos os comandos e na configuração do IntelliJ.
 
-## Estrutura do projeto
+### 2. Criar o usuário e o banco
 
-```
-gestao-verbas/
-├── .env.example
-├── compose.yaml
-├── Dockerfile
-├── mvnw / mvnw.cmd          # Maven Wrapper 3.9.16 (gerado oficialmente)
-├── requisitos.md
-├── pom.xml                   # Spring Boot parent 3.5.16
-├── src/
-│   ├── main/
-│   │   ├── java/br/com/gabriel/verbas/
-│   │   │   ├── departamento/   # controller, service, repository, entity, dto
-│   │   │   ├── solicitacao/   # controller, service, repository, entity, dto
-│   │   │   ├── historico/     # entidade, repository, registro de decisões
-│   │   │   └── shared/        # exceções, handlers, validação monetária
-│   │   └── resources/
-│   │       ├── application.yml
-│   │       └── db/migration/  # V1__criar_estrutura.sql, V2__adicionar_indices.sql
-│   └── test/                  # testes unitários e de integração (Testcontainers)
-├── docs/
-│   ├── arquitetura.md
-│   ├── api.http
-│   ├── consultas.sql
-│   └── roteiro-estudo.md
-└── scripts/
-    └── demo.ps1
+No PowerShell do Windows, conecte como administrador. O caminho abaixo considera PostgreSQL 18; adapte à versão instalada:
+
+```powershell
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -h 127.0.0.1 -p 5432 -U postgres -d postgres -W
 ```
 
-Pacotes de funcionalidade (feature packages): `departamento`, `solicitacao`, `historico`, `shared` — cada módulo agrupa suas entidades, repositórios, serviços e controllers; `shared` concentra exceções de domínio, handlers globais e validação monetária comum.
+Informe a senha do usuário administrador `postgres`. Dentro do terminal do **psql**, execute os comandos abaixo, um por vez:
 
-### Arquitetura (resumo)
+```sql
+CREATE ROLE verbas WITH LOGIN;
+```
 
-- **Controller** (web): valida entrada via Bean Validation, delega ao serviço, mapeia exceções de domínio para HTTP 400/404/409.
-- **Service** (domínio): regras de negócio, transação (`@Transactional`), protocolo de bloqueio pessimista (bloqueia departamento → carrega solicitação → valida → reserva saldo e muda situação → flush → grava histórico → commit).
-- **Repository** (persistência): Spring Data JPA; bloqueio pessimista via lock no repositório de departamentos.
-- **Migrations:** Flyway (`V1__criar_estrutura.sql`, `V2__adicionar_indices.sql`); JPA configurado com `validate` e `open-in-view: false`.
-- **Banco:** PostgreSQL 16.6 (alpine) via Docker; dinheiro `NUMERIC(14,2)`, tempo `TIMESTAMPTZ`.
+Defina a senha do novo usuário com o comando interativo do psql:
 
-Detalhes completos em [`docs/arquitetura.md`](docs/arquitetura.md).
+```text
+\password verbas
+```
 
----
+Digite e confirme uma senha de sua escolha. Em seguida, crie o banco com esse usuário como proprietário:
 
-## Como executar (Docker no Ubuntu WSL)
+```sql
+CREATE DATABASE verbas OWNER verbas;
+```
 
-Na máquina de Gabriel, comece pelo [passo a passo do WSL](docs/ambiente-wsl.md). Os comandos Docker desta seção devem ser executados dentro do Ubuntu. O comando `docker-compose` é o disponível nesse ambiente; em instalações com Compose v2, use `docker compose -f compose.yaml`.
+Saia com `\q`. Essa preparação é feita uma única vez por instalação. Se o usuário já existir, não repita `CREATE ROLE`; use `\password verbas` para redefinir sua senha, se necessário. Se o banco já existir, preserve-o e confira seu proprietário e as permissões.
 
-Nesta cópia local, `.env` já foi criado com uma senha aleatória durante a validação; preserve-o. Em um clone novo, copie o exemplo conforme abaixo.
+**A senha de `postgres` não é automaticamente a senha de `verbas`.** São usuários distintos. A aplicação deve receber a senha definida para `verbas`.
 
-1. Copie o exemplo de variáveis e edite a senha:
+Teste a conexão antes de abrir a aplicação:
 
-   ```powershell
-   Copy-Item .env.example .env
-   notepad .env
-   # Linux: cp .env.example .env && nano .env
-   ```
+```powershell
+& 'C:\Program Files\PostgreSQL\18\bin\psql.exe' -h 127.0.0.1 -p 5432 -U verbas -d verbas -W
+```
 
-   Em `.env`, substitua o placeholder de `POSTGRES_PASSWORD` pela sua senha local desejada (não use a literal do exemplo em produção; aqui é um ambiente local de estudo).
+Se aparecer o prompt `verbas=>`, as credenciais permitem acessar o banco. Saia com `\q`.
 
-2. Suba a aplicação completa (banco + API):
+Referência: [comandos e conexão pelo psql](https://www.postgresql.org/docs/18/app-psql.html).
 
-   ```powershell
-   docker-compose -f compose.yaml --profile app up --build -d
-   # Linux: docker-compose -f compose.yaml --profile app up --build -d
-   ```
+### 3. Configurar e executar no IntelliJ
 
-3. A API estará em **http://localhost:8080** (endereço vinculado a `127.0.0.1`).
+1. Abra a pasta do projeto e importe o `pom.xml` como projeto Maven.
+2. Configure o **Project SDK** e o JDK da execução como **Java 21**.
+3. Abra `VerbasApplication` e crie uma configuração de execução para sua função `main`.
+4. Entre em **Run → Edit Configurations** e selecione a configuração da aplicação.
+5. Se **Environment variables** não aparecer, habilite-o em **Modify options**. Abra o editor desse campo e adicione uma variável por linha:
 
-4. Para encerrar **preservando os dados** (volume nomeado):
+| Nome | Valor para PostgreSQL local na porta 5432 |
+|---|---|
+| `DB_URL` | `jdbc:postgresql://127.0.0.1:5432/verbas` |
+| `DB_USERNAME` | `verbas` |
+| `DB_PASSWORD` | A senha que você definiu para o usuário `verbas` |
+| `SERVER_ADDRESS` | `127.0.0.1` |
 
-   ```powershell
-   docker-compose -f compose.yaml down
-   ```
+Esses valores pertencem a **Environment variables**, não a **Active profiles**, **VM options** ou **Program arguments**. O texto da célula de senha é uma orientação: substitua-o pela sua senha real. Não compartilhe uma configuração de execução contendo essa senha.
 
-   > Não é necessário nem recomendado remover o volume por padrão. `docker-compose -f compose.yaml down` sem `-v` mantém o volume nomeado do PostgreSQL; os dados persistem entre execuções.
+Salve e execute `br.com.gabriel.verbas.VerbasApplication`. Aguarde a mensagem `Started VerbasApplication`. Nessa inicialização, o Flyway cria as tabelas no banco preparado anteriormente.
 
-O serviço `app` é opcional (perfil `app`); o serviço `db` usa `postgres:16.6-alpine` com porta hospedeira **5433** → interna 5432 e volume nomeado.
+Referência: [configuração de execução Spring Boot no IntelliJ IDEA](https://www.jetbrains.com/help/idea/run-debug-configuration-spring-boot.html).
 
-## Como executar (Java local — alternativa)
+### Alternativa pelo terminal
 
-1. Confirme **JDK 21** no `JAVA_HOME`:
+Com JDK 21 configurado em `JAVA_HOME`, no PowerShell e na pasta do projeto:
 
-   ```powershell
-   java -version   # deve indicar 21
-   # Linux: java -version
-   ```
-2. Suba apenas o banco:
+```powershell
+$env:DB_URL = 'jdbc:postgresql://127.0.0.1:5432/verbas'
+$env:DB_USERNAME = 'verbas'
+$env:DB_PASSWORD = 'SUBSTITUA_PELA_SENHA_DE_VERBAS'
+$env:SERVER_ADDRESS = '127.0.0.1'
+.\mvnw.cmd spring-boot:run
+```
 
-   ```powershell
-   docker-compose -f compose.yaml up -d db
-   ```
+Substitua o exemplo de senha antes de executar. As variáveis desse terminal valem para processos iniciados por ele; configure também a execução do IntelliJ se for iniciar pela IDE.
 
-3. Configure as variáveis de ambiente. **Atenção: o Spring não carrega `.env` automaticamente** — defina `DB_PASSWORD` com a MESMA senha que você colocou em `POSTGRES_PASSWORD` no `.env`:
+## Docker no Ubuntu ou WSL
 
-   ```powershell
-   $env:DB_PASSWORD = "sua-senha-do-.env"
-   # DB_USERNAME padrão: verbas
-   # DB_URL padrão: jdbc:postgresql://localhost:5433/verbas
-   # Linux: export DB_PASSWORD="sua-senha-do-.env"
-   ```
+Com o Docker Engine ativo dentro do Ubuntu/WSL, não é necessário abrir o Docker Desktop do Windows. Entre na pasta do projeto pelo terminal Linux; arquivos no disco `C:` ficam acessíveis em `/mnt/c/`.
 
-4. Execute:
+Confirme as ferramentas:
 
-   ```powershell
-   .\mvnw.cmd spring-boot:run
-   # Linux: ./mvnw spring-boot:run
-   ```
+```bash
+docker info
+docker compose version
+```
 
-A API continua em http://localhost:8080. Endpoints são locais e **sem autenticação** (protótipo de estudo).
+Os comandos abaixo usam o plugin `docker compose`. Se o ambiente tiver apenas `docker-compose`, use essa forma no lugar de `docker compose`. Para instalar o plugin, siga a [documentação oficial do Docker](https://docs.docker.com/compose/install/linux/), de acordo com os repositórios da sua distribuição.
 
----
+### Preparar e iniciar
+
+Em um clone novo, copie o exemplo e edite a senha:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Defina `POSTGRES_PASSWORD` com uma senha local. Se `.env` já estiver configurado, preserve-o. Esse arquivo é ignorado pelo Git.
+
+```bash
+docker compose -f compose.yaml --profile app up --build -d
+docker compose -f compose.yaml --profile app ps
+docker compose -f compose.yaml logs --tail=100 app
+```
+
+Na primeira inicialização com volume vazio, a imagem do PostgreSQL cria o usuário `verbas` e o banco `verbas`. Depois, o Flyway cria as tabelas. **Alterar `POSTGRES_PASSWORD` no `.env` não redefine a senha de um banco que já possui dados no volume.** Esse comportamento pertence à [imagem oficial do PostgreSQL](https://hub.docker.com/_/postgres).
+
+| Serviço | Acesso a partir do Windows/host |
+|---|---|
+| API | `http://localhost:8080` |
+| PostgreSQL | `127.0.0.1:5433`, banco `verbas`, usuário `verbas` |
+
+Dentro da rede do Compose, a aplicação acessa o banco por `db:5432`. A porta `5433` é a publicação para ferramentas externas, como psql ou o cliente de banco do IntelliJ. PostgreSQL não é acessado pelo navegador.
+
+### Logs, parada e atualização do código
+
+```bash
+# Acompanhar a aplicação; Ctrl+C encerra apenas esta visualização
+docker compose -f compose.yaml logs -f app
+
+# Consultar o banco
+docker compose -f compose.yaml logs --tail=100 db
+
+# Encerrar os serviços preservando o volume de dados
+docker compose -f compose.yaml --profile app down
+
+# Subir novamente, incluindo alterações no código Java
+docker compose -f compose.yaml --profile app up --build -d
+```
+
+Para atualizar somente a aplicação enquanto o banco continua ativo:
+
+```bash
+docker compose -f compose.yaml --profile app up --build -d app
+```
+
+`restart` apenas reinicia o contêiner existente; use `--build` após alterar Java ou dependências. Não acrescente `-v` ao `down` se deseja preservar o banco: essa opção remove o volume de dados.
+
+## IntelliJ com banco no Docker
+
+Prepare `.env` como na seção anterior e, no Ubuntu/WSL, inicie apenas o banco:
+
+```bash
+docker compose -f compose.yaml up -d db
+```
+
+No IntelliJ, use as instruções de execução local, com estes ajustes:
+
+- `DB_URL=jdbc:postgresql://127.0.0.1:5433/verbas`
+- `DB_USERNAME=verbas`
+- `DB_PASSWORD` igual à senha de `verbas` no contêiner, definida por `POSTGRES_PASSWORD` na primeira inicialização do volume.
+
+**O Spring Boot deste projeto não carrega `.env` automaticamente.** Esse arquivo é usado pelo Compose; a execução pela IDE precisa receber as variáveis no IntelliJ.
+
+Se o contêiner `app` já estiver rodando, pare-o antes de iniciar a aplicação pela IDE, para liberar a porta `8080`:
+
+```bash
+docker compose -f compose.yaml stop app
+```
+
+Nesse modo, alterações no Java exigem reiniciar a aplicação pelo IntelliJ. Os logs da API ficam no console **Run**, enquanto os logs do banco continuam no Docker.
+
+## Configuração
+
+| Variável | Padrão | Uso |
+|---|---|---|
+| `DB_URL` | `jdbc:postgresql://localhost:5433/verbas` | Endereço JDBC do banco; ajuste à porta real |
+| `DB_USERNAME` | `verbas` | Usuário de conexão da aplicação |
+| `DB_PASSWORD` | Sem padrão; obrigatória | Senha desse usuário |
+| `SERVER_ADDRESS` | `127.0.0.1` | Interface de escuta da API; o Compose define `0.0.0.0` dentro do contêiner |
+| `POSTGRES_PASSWORD` | Sem padrão; obrigatória no Compose | Inicializa a senha no volume novo e fornece `DB_PASSWORD` ao serviço `app` |
+
+A API usa a porta `8080`. Evite executar a API simultaneamente no Docker e no IntelliJ nessa porta. Da mesma forma, não publique o banco Docker na porta `5433` se ela já estiver ocupada por uma instalação local do PostgreSQL.
+
+## Endpoints e exemplos
+
+URL base: `http://localhost:8080`. A aplicação fornece uma API, sem página inicial ou Swagger configurado. Um `404` em `/` não significa, por si só, falha na inicialização. Use o Postman ou os exemplos em [docs/api.http](docs/api.http).
+
+| Método | Endpoint | Operação | Sucesso |
+|---|---|---|---|
+| `POST` | `/departamentos` | Criar departamento | `201` |
+| `GET` | `/departamentos` | Listar departamentos | `200` |
+| `GET` | `/departamentos/{id}` | Consultar departamento | `200` |
+| `POST` | `/departamentos/{id}/solicitacoes` | Abrir solicitação no departamento | `201` |
+| `GET` | `/solicitacoes` | Listar solicitações com filtros e paginação | `200` |
+| `GET` | `/solicitacoes/{id}` | Consultar solicitação | `200` |
+| `POST` | `/solicitacoes/{id}/aprovar` | Aprovar e reservar saldo | `200` |
+| `POST` | `/solicitacoes/{id}/rejeitar` | Rejeitar com justificativa | `200` |
+| `GET` | `/solicitacoes/{id}/historico` | Consultar decisões da solicitação | `200` |
+
+A listagem de solicitações aceita `departamentoId`, `status`, `page` e `size`. A página começa em `0`, o tamanho padrão é `20` e o máximo é `100`. Os status são `PENDENTE`, `APROVADA` e `REJEITADA`.
+
+### Primeiro fluxo pelo Postman
+
+Nas requisições `POST`, selecione **Body → raw → JSON**, com `Content-Type: application/json`.
+
+**1. Criar departamento:** `POST /departamentos`
+
+```json
+{
+  "nome": "Engenharia",
+  "orcamentoTotal": 10000.00
+}
+```
+
+**2. Abrir solicitação:** `POST /departamentos/{idDepartamento}/solicitacoes`
+
+```json
+{
+  "descricao": "Compra de equipamentos",
+  "valor": 7000.00
+}
+```
+
+**3. Aprovar:** `POST /solicitacoes/{idSolicitacao}/aprovar`
+
+```json
+{
+  "responsavel": "Gabriel"
+}
+```
+
+Substitua os marcadores pelos IDs retornados em cada criação. **O ID do departamento e o ID da solicitação identificam registros diferentes**, mesmo quando os números coincidem.
+
+Consulte `GET /departamentos/{idDepartamento}` para conferir o saldo disponível de `3000.00` e `GET /solicitacoes/{idSolicitacao}/historico` para ver a decisão. Uma segunda solicitação de `7000.00` não poderá ser aprovada nesse departamento por falta de saldo; ela continuará pendente.
+
+Para rejeitar uma solicitação ainda pendente, use `POST /solicitacoes/{idSolicitacao}/rejeitar`:
+
+```json
+{
+  "responsavel": "Gabriel",
+  "justificativa": "Investimento adiado para outro período"
+}
+```
+
+### Respostas de erro e histórico
+
+| Código | Significado |
+|---|---|
+| `400 Bad Request` | Entrada inválida, como valor negativo, mais de duas casas decimais ou justificativa vazia |
+| `404 Not Found` | Recurso ou rota inexistente |
+| `409 Conflict` | Saldo insuficiente, solicitação já decidida ou conflito de concorrência |
+
+O histórico pertence à **solicitação**: `/departamentos/{id}/historico` não existe. Uma solicitação existente e ainda sem decisão retorna `200` com `[]` em seu histórico; um ID de solicitação inexistente retorna `404`.
 
 ## Testes
 
-**No ambiente de Gabriel:** execute `sh scripts/testar-wsl.sh` no Ubuntu. Os comandos Maven diretos abaixo pressupõem Java e acesso ao Docker no mesmo ambiente.
+O Maven Wrapper acompanha o projeto; não é necessário instalar Maven separadamente. Os comandos locais exigem JDK 21.
 
-> **Validação em 05/10/2026:** 33 testes aprovados, zero falhas, erros ou testes ignorados: 9 unitários, 22 de API/concorrência/rollback e 2 de migrations. Executados no Docker do Ubuntu WSL com PostgreSQL 16.6. Veja [evidências](docs/validacao.md).
+| Verificação | Windows / PowerShell | Linux |
+|---|---|---|
+| Unitários | `.\mvnw.cmd test` | `sh ./mvnw test` |
+| Unitários e integração | `.\mvnw.cmd -Pintegration verify` | `sh ./mvnw -Pintegration verify` |
 
-- **Testes unitários** (sem Docker):
+Os testes de integração exigem acesso ao Docker e usam PostgreSQL temporários criados pelo Testcontainers. No Ubuntu/WSL, também é possível executar a suíte em um contêiner Maven, sem instalar o JDK no Linux:
 
-  ```powershell
-  .\mvnw.cmd test
-  # Linux: ./mvnw test
-  ```
+```bash
+sh scripts/testar-wsl.sh
+```
 
-- **Testes de integração** (requer Docker em execução; falham se o Docker não estiver disponível — comportamento intencional):
+A suíte cobre validação monetária, transições de status, saldo insuficiente, decisões duplicadas, rollback, aprovações concorrentes e migrações com preservação de dados. Os bancos dos testes são isolados do volume usado pela aplicação.
 
-  ```powershell
-  .\mvnw.cmd -Pintegration verify
-  # Linux: ./mvnw -Pintegration verify
-  ```
-
-  Usam **Testcontainers 1.21.3** com imagem `postgres:16.6-alpine`: cada execução cria contêineres PostgreSQL isolados e descartáveis — **nunca tocam nos dados locais** do volume nomeado.
-
-### Unitários × Integração
-
-- **Unitários** validam regras de negócio isoladas (validação monetária, transições de status, cálculo de saldo) diretamente nas entidades e no validador monetário. Não provam comportamento real do banco.
-- **Integração** provam o que só o banco real garante: rollback transacional, bloqueio pessimista sob concorrência, constraints de schema e preservação de dados entre migrações.
-
-Cenários verificados pelos testes de integração:
-1. Aprovação com saldo insuficiente → HTTP 409 e saldo intacto.
-2. Decisão duplicada (aprovar duas vezes, ou aprovar após rejeitar) → HTTP 409.
-3. Rejeição sem justificativa → HTTP 400.
-4. Falha antes da gravação do histórico → nada é persistido (atomicidade/rollback).
-5. Duas solicitações concorrentes de 7000 com orçamento 10000 → exatamente uma aprovação, uma HTTP 409 (bloqueio pessimista).
-6. Entradas de API inválidas (valor negativo, 3 casas decimais, campos ausentes) → HTTP 400.
-7. Constraints do banco (FK, NUMERIC(14,2), status permitido) respeitadas.
-8. Migrações V1 → V2 preservam dados existentes.
-A persistência após reinício da API também foi verificada separadamente; os dados e o histórico original permaneceram iguais.
-
----
-
-## Demonstração de 5 minutos
-
-Com a API em execução, rode o script de demonstração (não apaga dados existentes; cria dados próprios):
+Para uma demonstração com a API já iniciada, execute no PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\demo.ps1
-# PowerShell 7: pwsh -File scripts/demo.ps1
-# Linux: pwsh -File scripts/demo.ps1
 ```
 
-O script: cria departamento com orçamento 10000; abre duas solicitações de 7000; aprova a primeira; consulta saldo e histórico; tenta aprovar a segunda e **espera HTTP 409** (saldo insuficiente), falhando explicitamente se a aprovação inesperadamente ocorrer. Veja também [`docs/api.http`](docs/api.http) para exemplos manuais.
+A demonstração cria seus próprios registros, aprova uma solicitação e verifica que outra aprovação sem saldo retorna `409`. Os registros ficam no banco da aplicação.
 
----
+## Solução de problemas
 
-## Git e publicação
+| Sintoma | O que verificar |
+|---|---|
+| `Connection refused` / SQL State `08001` | Serviço PostgreSQL iniciado, host correto e porta real na `DB_URL`. A conexão ainda não chegou à autenticação. |
+| `password authentication failed` / SQL State `28P01` | Teste o mesmo host, porta, usuário e banco pelo psql. Confirme a existência do usuário e a senha dele; a senha de `postgres` não é herdada por `verbas`. |
+| `role "verbas" does not exist` | Crie o usuário na mesma instância do PostgreSQL que a aplicação acessa, conforme o passo a passo local. |
+| `database "verbas" does not exist` | Crie `verbas` com proprietário `verbas` antes de iniciar o Spring Boot. O Flyway não cria esse database. |
+| `.env` preenchido, mas erro de senha no IntelliJ | Configure `DB_PASSWORD` nas variáveis da execução da IDE. O projeto não importa `.env` automaticamente. |
+| Senha alterada no `.env`, mas banco Docker recusa conexão | O volume existente mantém a senha anterior. Redefina a senha do usuário no PostgreSQL e alinhe as configurações; não apague o volume como correção de senha. |
+| `Port 8080 was already in use` | Confira se outra execução da API está ativa no IntelliJ ou no Docker. |
+| Porta `5433` ocupada | Confira se PostgreSQL local e Docker estão tentando usar a mesma porta do host. |
+| `404` em `http://localhost:8080/` | Não existe rota inicial. Teste um endpoint documentado, como `GET /solicitacoes`. |
+| “Solicitação já foi decidida” | Consulte `GET /solicitacoes/{id}` e confira o ID usado no Postman. Uma falha por saldo insuficiente não rejeita automaticamente a solicitação. |
+| `docker: unknown command: docker compose` | O plugin não está disponível nesse ambiente. Verifique `docker-compose --version` ou instale o plugin seguindo a documentação oficial. |
+| `KeyError: 'ContainerConfig'` no Compose 1.29.2 | Falha do Compose antigo ao recriar o contêiner; use o procedimento abaixo ou migre para o plugin moderno. |
 
-O repositório local já está inicializado na branch `main`, com commits por etapa. Consulte `git log --oneline`. Ainda não há remoto configurado.
+Para contornar a falha `ContainerConfig` no ambiente legado, remova somente o contêiner da aplicação e crie-o novamente, no Ubuntu/WSL:
 
-Para publicar, **crie você mesmo** um repositório vazio no GitHub e use a URL fornecida por você (não há remote inventado aqui):
-
-```powershell
-git remote add origin <URL_DO_REPOSITORIO>
-git push -u origin main
+```bash
+docker-compose -f compose.yaml rm -sf app
+docker-compose -f compose.yaml --profile app up --build -d app
+docker-compose -f compose.yaml logs --tail=100 app
 ```
 
----
+Esse procedimento preserva o serviço do banco e seu volume. A solução de manutenção é atualizar o Compose; a recriação acima é uma alternativa para o ambiente legado.
 
-## Limitações e trabalho futuro (separação clara)
+## Escopo e documentação
 
-**Limitações atuais (intencionais):**
-- Sem autenticação/autorização; `responsavel` é texto livre do cliente e **não é verificado**.
-- Histórico **não é à prova de adulteração por DBA** — qualquer pessoa com acesso direto ao banco pode alterar linhas; a trilha é auditoria de aplicação, não criptográfica.
-- Sem edição/exclusão de registros (por design).
-- Sem pagamento/baixa de verbas (aprovar = reservar).
-- Sem renovação anual de orçamento.
-- Sem frontend, pagamentos, nuvem ou microsserviços — aplicação local única de estudo.
+O projeto é uma API de estudo e portfólio. O escopo atual não inclui autenticação, autorização, edição ou exclusão de registros, pagamentos, renovação anual de orçamento nem interface gráfica. O campo `responsavel` é informado pelo cliente, sem verificação de identidade. O histórico registra decisões da aplicação, mas não impede alterações feitas por quem tem acesso direto ao banco.
 
-**Futuro (fora do escopo atual):**
-- Autenticação: o responsável pela decisão virá de **contexto confiável do servidor** (ex.: principal autenticado), não do corpo da requisição.
-- Trilha de auditoria reforçada (append-only a nível de banco, hashes encadeados ou tabela imutável por permissões).
-- Relatórios, frontend e demais extensões.
-
----
-
-## Licença e uso
-
-Projeto local de estudo. Uso educacional.
+- [Requisitos e regras de negócio](requisitos.md)
+- [Decisões de arquitetura](docs/arquitetura.md)
+- [Exemplos de requisições HTTP](docs/api.http)
+- [Consultas SQL para conferência](docs/consultas.sql)
+- [Roteiro de estudo por módulo](docs/roteiro-estudo.md)
