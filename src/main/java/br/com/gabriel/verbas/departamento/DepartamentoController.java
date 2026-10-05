@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
+import java.util.List;
 
 @RestController
 @RequestMapping("/departamentos")
@@ -27,6 +28,11 @@ public class DepartamentoController {
     public ResponseEntity<DepartamentoResponse> criar(@Valid @RequestBody DepartamentoRequest request) {
         DepartamentoResponse response = service.criar(request);
         return ResponseEntity.created(URI.create("/departamentos/" + response.id())).body(response);
+    }
+
+    @GetMapping()
+    public ResponseEntity<List<DepartamentoResponse>> listarTodos() {
+        return ResponseEntity.ok(service.buscarTodos());
     }
 
     @GetMapping("/{id}")

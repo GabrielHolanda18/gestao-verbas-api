@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 @Service
 public class DepartamentoService {
@@ -30,6 +31,13 @@ public class DepartamentoService {
         return repository.findById(id)
                 .map(DepartamentoResponse::from)
                 .orElseThrow(() -> new RecursoNaoEncontradoException("Departamento não encontrado"));
+    }
+
+    @Transactional(readOnly = true)
+    public List<DepartamentoResponse> buscarTodos() {
+        return repository.findAll().stream()
+                .map(DepartamentoResponse::from)
+                .toList();
     }
 
     @Transactional(readOnly = true)
